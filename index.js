@@ -117,6 +117,52 @@ app.get("/api/studios/:id", async (req, res) => {
   res.json(studio);
 });
 
+// Update studio
+app.put("/api/studios/:id", async (req, res) => {
+  if (!ObjectId.isValid(req.params.id)) {
+    return res.status(400).json({ message: "Invalid studio id" });
+  }
+
+  const b = req.body;
+  const fields = {
+    title: String(b.title ?? "").trim(),
+    category: String(b.category ?? "").trim(),
+    hourlyRate: Number(b.hourlyRate),
+    securityDeposit: Number(b.securityDeposit ?? 0),
+    maxCapacity: Number(b.maxCapacity),
+    location: String(b.location ?? "").trim(),
+    image: String(b.image ?? "").trim(),
+    amenities: Array.isArray(b.amenities) ? b.amenities.map(String) : [],
+    overview: String(b.overview ?? "").trim(),
+  };
+
+  const invalid =
+    !fields.title ||
+    !fields.category ||
+    !fields.location ||
+    !fields.image ||
+    !fields.overview ||
+    !(fields.hourlyRate > 0) ||
+    !(fields.maxCapacity > 0) ||
+    !(fields.securityDeposit >= 0);
+
+  if (invalid) {
+    return res
+      .status(400)
+      .json({ message: "Please fill in all required fields correctly" });
+  }
+
+  const result = await studioCollection.updateOne(
+    { _id: new ObjectId(req.params.id) },
+    { $set: { ...fields, updatedAt: new Date() } }
+  );
+  if (result.matchedCount === 0) {
+    return res.status(404).json({ message: "Studio not found" });
+  }
+  res.json({ updated: true });
+});
+
+
 
 
 
