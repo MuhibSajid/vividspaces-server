@@ -266,7 +266,23 @@ app.post("/api/bookings", async (req, res) => {
 });
 
 
+// Guest cancels a Pending booking
+app.patch("/api/bookings/:id/cancel", async (req, res) => {
+  if (!ObjectId.isValid(req.params.id)) {
+    return res.status(400).json({ message: "Invalid booking id" });
+  }
 
+  const result = await bookingCollection.updateOne(
+    { _id: new ObjectId(req.params.id), status: "Pending" },
+    { $set: { status: "Cancelled", cancelledAt: new Date() } }
+  );
+  if (result.matchedCount === 0) {
+    return res
+      .status(400)
+      .json({ message: "Only pending bookings can be cancelled" });
+  }
+  res.json({ cancelled: true });
+});
 
 
 
