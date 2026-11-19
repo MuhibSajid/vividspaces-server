@@ -162,7 +162,19 @@ app.put("/api/studios/:id", async (req, res) => {
   res.json({ updated: true });
 });
 
-
+// Delete studio
+app.delete("/api/studios/:id", async (req, res) => {
+  if (!ObjectId.isValid(req.params.id)) {
+    return res.status(400).json({ message: "Invalid studio id" });
+  }
+  const result = await studioCollection.deleteOne({
+    _id: new ObjectId(req.params.id),
+  });
+  if (result.deletedCount === 0) {
+    return res.status(404).json({ message: "Studio not found" });
+  }
+  res.json({ deleted: true });
+});
 
 
 
