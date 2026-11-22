@@ -1,38 +1,46 @@
 import express from "express";
-import cors from 'cors';
-import 'dotenv/config';
+import cors from "cors";
+import "dotenv/config";
 import { MongoClient, ObjectId } from "mongodb";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors());
+app.use(
+  cors({
+    origin: [
+      "http://localhost:3000",
+      "https://vividspaces-client.vercel.app",
+    ],
+  })
+);
 app.use(express.json());
+
+/* ================= DATABASE ================= */
 
 const client = new MongoClient(process.env.MONGODB_SERVER_URL);
 
-
-export async function connectToMongoDB() {
-  try {
-    await client.connect();
-    console.log("You successfully connected to MongoDB!");
-    return client;
-  } catch (err) {
-    console.dir(err);
-  }
+try {
+  await client.connect();
+  console.log("You successfully connected to MongoDB!");
+} catch (err) {
+  console.error("MongoDB connection failed:", err);
+  throw err;
 }
 
-const mongoClient = await connectToMongoDB()
-const db = mongoClient.db("vividspaces")
-const studioCollection = db.collection('studios');
-const bookingCollection = db.collection('bookings');
+const db = client.db("vividspaces");
+const studioCollection = db.collection("studios");
+const bookingCollection = db.collection("bookings");
 
+/* ================= ROOT ================= */
 
 app.get("/", (req, res) => {
-  res.send("Hello World from PH..");
+  res.json({ ok: true, name: "VividSpaces API" });
 });
 
+/* ================= STUDIOS ================= */
 
+// Add new studio
 app.post("/api/studios", async (req, res) => {
   const b = req.body;
 
@@ -79,6 +87,7 @@ app.post("/api/studios", async (req, res) => {
   res.status(201).json({ ...doc, _id: result.insertedId });
 });
 
+// List studios: ?category=&search=&location=&limit=&sort=&ownerEmail=
 app.get("/api/studios", async (req, res) => {
   const { category, search, location, limit, sort, ownerEmail } = req.query;
 
@@ -103,6 +112,14 @@ app.get("/api/studios", async (req, res) => {
     .limit(max)
     .toArray();
   res.json(studios);
+});
+
+// Studio count per category (for the home page)
+app.get("/api/categories/counts", async (req, res) => {
+  const rows = await studioCollection
+    .aggregate([{ $group: { _id: "$category", count: { $sum: 1 } } }])
+    .toArray();
+  res.json(Object.fromEntries(rows.map((r) => [r._id, r.count])));
 });
 
 // Single studio (for details and edit pages)
@@ -162,14 +179,6 @@ app.put("/api/studios/:id", async (req, res) => {
   res.json({ updated: true });
 });
 
-// Studio count per category (for the home page)
-app.get("/api/categories/counts", async (req, res) => {
-  const rows = await studioCollection
-    .aggregate([{ $group: { _id: "$category", count: { $sum: 1 } } }])
-    .toArray();
-  res.json(Object.fromEntries(rows.map((r) => [r._id, r.count])));
-});
-
 // Delete studio
 app.delete("/api/studios/:id", async (req, res) => {
   if (!ObjectId.isValid(req.params.id)) {
@@ -184,9 +193,7 @@ app.delete("/api/studios/:id", async (req, res) => {
   res.json({ deleted: true });
 });
 
-
-
-///      Booking Api          //
+/* ================= BOOKINGS ================= */
 
 // My bookings (as guest): ?email=
 app.get("/api/bookings", async (req, res) => {
@@ -200,6 +207,17 @@ app.get("/api/bookings", async (req, res) => {
   res.json(bookings);
 });
 
+// Bookings for studios I host: ?email=
+app.get("/api/bookings/host", async (req, res) => {
+  const email = String(req.query.email ?? "");
+  if (!email) return res.status(400).json({ message: "Email is required" });
+
+  const bookings = await bookingCollection
+    .find({ ownerEmail: email })
+    .sort({ createdAt: -1 })
+    .toArray();
+  res.json(bookings);
+});
 
 // Create booking (status: Pending)
 app.post("/api/bookings", async (req, res) => {
@@ -273,7 +291,6 @@ app.post("/api/bookings", async (req, res) => {
   res.status(201).json({ ...doc, _id: result.insertedId });
 });
 
-
 // Guest cancels a Pending booking
 app.patch("/api/bookings/:id/cancel", async (req, res) => {
   if (!ObjectId.isValid(req.params.id)) {
@@ -290,18 +307,6 @@ app.patch("/api/bookings/:id/cancel", async (req, res) => {
       .json({ message: "Only pending bookings can be cancelled" });
   }
   res.json({ cancelled: true });
-});
-
-// Bookings for studios I host: ?email=
-app.get("/api/bookings/host", async (req, res) => {
-  const email = String(req.query.email ?? "");
-  if (!email) return res.status(400).json({ message: "Email is required" });
-
-  const bookings = await bookingCollection
-    .find({ ownerEmail: email })
-    .sort({ createdAt: -1 })
-    .toArray();
-  res.json(bookings);
 });
 
 // Host updates a booking: Confirmed / Completed / Cancelled
@@ -351,11 +356,7 @@ app.patch("/api/bookings/:id/status", async (req, res) => {
   res.json({ updated: true, status });
 });
 
-
-
-
-
-
+/* ================= FALLBACKS ================= */
 
 app.use((req, res) => res.status(404).json({ message: "Route not found" }));
 app.use((err, req, res, next) => {
@@ -363,8 +364,13 @@ app.use((err, req, res, next) => {
   res.status(500).json({ message: "Internal server error" });
 });
 
-app.listen(PORT, () => {
-  console.log(`Example app listening on port ${PORT}`);
-});
+/* ================= START ================= */
 
-export default app
+// Vercel runs the exported app itself, so only listen locally
+if (process.env.VERCEL !== "1") {
+  app.listen(PORT, () => {
+    console.log(`API running on port ${PORT}`);
+  });
+}
+
+export default app;
