@@ -89,7 +89,7 @@ app.get("/api/studios", async (req, res) => {
   if (ownerEmail) filter.ownerEmail = String(ownerEmail);
 
   const sorts = {
-    rating: { rating: -1 },
+    rating: { rating: -1, createdAt: -1 },
     "price-asc": { hourlyRate: 1 },
     "price-desc": { hourlyRate: -1 },
     newest: { createdAt: -1 },
@@ -160,6 +160,14 @@ app.put("/api/studios/:id", async (req, res) => {
     return res.status(404).json({ message: "Studio not found" });
   }
   res.json({ updated: true });
+});
+
+// Studio count per category (for the home page)
+app.get("/api/categories/counts", async (req, res) => {
+  const rows = await studioCollection
+    .aggregate([{ $group: { _id: "$category", count: { $sum: 1 } } }])
+    .toArray();
+  res.json(Object.fromEntries(rows.map((r) => [r._id, r.count])));
 });
 
 // Delete studio
@@ -284,11 +292,76 @@ app.patch("/api/bookings/:id/cancel", async (req, res) => {
   res.json({ cancelled: true });
 });
 
+// Bookings for studios I host: ?email=
+app.get("/api/bookings/host", async (req, res) => {
+  const email = String(req.query.email ?? "");
+  if (!email) return res.status(400).json({ message: "Email is required" });
+
+  const bookings = await bookingCollection
+    .find({ ownerEmail: email })
+    .sort({ createdAt: -1 })
+    .toArray();
+  res.json(bookings);
+});
+
+// Host updates a booking: Confirmed / Completed / Cancelled
+app.patch("/api/bookings/:id/status", async (req, res) => {
+  if (!ObjectId.isValid(req.params.id)) {
+    return res.status(400).json({ message: "Invalid booking id" });
+  }
+
+  const { status } = req.body;
+  const allowedNext = {
+    Pending: ["Confirmed", "Cancelled"],
+    Confirmed: ["Completed", "Cancelled"],
+  };
+
+  const booking = await bookingCollection.findOne({
+    _id: new ObjectId(req.params.id),
+  });
+  if (!booking) return res.status(404).json({ message: "Booking not found" });
+
+  if (!allowedNext[booking.status]?.includes(status)) {
+    return res.status(400).json({
+      message: `A ${booking.status.toLowerCase()} booking can't be changed to ${String(status).toLowerCase()}.`,
+    });
+  }
+
+  // Re-check overlap before confirming
+  if (status === "Confirmed") {
+    const conflict = await bookingCollection.findOne({
+      _id: { $ne: booking._id },
+      studioId: booking.studioId,
+      date: booking.date,
+      status: "Confirmed",
+      startTime: { $lt: booking.endTime },
+      endTime: { $gt: booking.startTime },
+    });
+    if (conflict) {
+      return res.status(409).json({
+        message: `This slot overlaps a confirmed booking (${conflict.startTime}–${conflict.endTime}).`,
+      });
+    }
+  }
+
+  await bookingCollection.updateOne(
+    { _id: booking._id },
+    { $set: { status, updatedAt: new Date() } }
+  );
+  res.json({ updated: true, status });
+});
 
 
 
 
 
+
+
+app.use((req, res) => res.status(404).json({ message: "Route not found" }));
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(500).json({ message: "Internal server error" });
+});
 
 app.listen(PORT, () => {
   console.log(`Example app listening on port ${PORT}`);
