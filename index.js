@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
 import "dotenv/config";
+import cookieParser from "cookie-parser";
+import { jwtVerify } from "jose";
 import { MongoClient, ObjectId } from "mongodb";
 
 const app = express();
@@ -8,13 +10,12 @@ const PORT = process.env.PORT || 5000;
 
 app.use(
   cors({
-    origin: [
-      "http://localhost:3000",
-      "https://vividspaces-client.vercel.app",
-    ],
+    origin: ["http://localhost:3000", "https://vividspaces-client.vercel.app"],
+    credentials: true,
   })
 );
 app.use(express.json());
+app.use(cookieParser());
 
 /* ================= DATABASE ================= */
 
@@ -32,6 +33,29 @@ const db = client.db("vividspaces");
 const studioCollection = db.collection("studios");
 const bookingCollection = db.collection("bookings");
 
+/* ================= AUTH (JWT) ================= */
+
+if (!process.env.JWT_SECRET) {
+  throw new Error("JWT_SECRET is not set");
+}
+const JWT_KEY = new TextEncoder().encode(process.env.JWT_SECRET);
+
+// Reads the JWT from the HttpOnly cookie, rejects with 401 if missing or invalid
+async function verifyToken(req, res, next) {
+  const token = req.cookies?.vs_token;
+  if (!token) return res.status(401).json({ message: "Unauthorized" });
+
+  try {
+    const { payload } = await jwtVerify(token, JWT_KEY, {
+      algorithms: ["HS256"],
+    });
+    req.user = { id: payload.sub, email: payload.email, name: payload.name };
+    next();
+  } catch {
+    res.status(401).json({ message: "Invalid or expired token" });
+  }
+}
+
 /* ================= ROOT ================= */
 
 app.get("/", (req, res) => {
@@ -40,8 +64,8 @@ app.get("/", (req, res) => {
 
 /* ================= STUDIOS ================= */
 
-// Add new studio
-app.post("/api/studios", async (req, res) => {
+// Add new studio (owner comes from the token)
+app.post("/api/studios", verifyToken, async (req, res) => {
   const b = req.body;
 
   const studio = {
@@ -54,8 +78,8 @@ app.post("/api/studios", async (req, res) => {
     image: String(b.image ?? "").trim(),
     amenities: Array.isArray(b.amenities) ? b.amenities.map(String) : [],
     overview: String(b.overview ?? "").trim(),
-    ownerName: String(b.ownerName ?? "").trim(),
-    ownerEmail: String(b.ownerEmail ?? "").trim(),
+    ownerName: String(req.user.name ?? "").trim(),
+    ownerEmail: String(req.user.email ?? "").trim(),
   };
 
   const invalid =
@@ -134,10 +158,20 @@ app.get("/api/studios/:id", async (req, res) => {
   res.json(studio);
 });
 
-// Update studio
-app.put("/api/studios/:id", async (req, res) => {
+// Update studio (owner only)
+app.put("/api/studios/:id", verifyToken, async (req, res) => {
   if (!ObjectId.isValid(req.params.id)) {
     return res.status(400).json({ message: "Invalid studio id" });
+  }
+
+  const existing = await studioCollection.findOne({
+    _id: new ObjectId(req.params.id),
+  });
+  if (!existing) return res.status(404).json({ message: "Studio not found" });
+  if (existing.ownerEmail !== req.user.email) {
+    return res
+      .status(403)
+      .json({ message: "You can only edit your own studios" });
   }
 
   const b = req.body;
@@ -170,7 +204,7 @@ app.put("/api/studios/:id", async (req, res) => {
   }
 
   const result = await studioCollection.updateOne(
-    { _id: new ObjectId(req.params.id) },
+    { _id: existing._id },
     { $set: { ...fields, updatedAt: new Date() } }
   );
   if (result.matchedCount === 0) {
@@ -179,50 +213,51 @@ app.put("/api/studios/:id", async (req, res) => {
   res.json({ updated: true });
 });
 
-// Delete studio
-app.delete("/api/studios/:id", async (req, res) => {
+// Delete studio (owner only)
+app.delete("/api/studios/:id", verifyToken, async (req, res) => {
   if (!ObjectId.isValid(req.params.id)) {
     return res.status(400).json({ message: "Invalid studio id" });
   }
-  const result = await studioCollection.deleteOne({
+
+  const existing = await studioCollection.findOne({
     _id: new ObjectId(req.params.id),
   });
-  if (result.deletedCount === 0) {
-    return res.status(404).json({ message: "Studio not found" });
+  if (!existing) return res.status(404).json({ message: "Studio not found" });
+  if (existing.ownerEmail !== req.user.email) {
+    return res
+      .status(403)
+      .json({ message: "You can only delete your own studios" });
   }
+
+  await studioCollection.deleteOne({ _id: existing._id });
   res.json({ deleted: true });
 });
 
 /* ================= BOOKINGS ================= */
 
-// My bookings (as guest): ?email=
-app.get("/api/bookings", async (req, res) => {
-  const email = String(req.query.email ?? "");
-  if (!email) return res.status(400).json({ message: "Email is required" });
-
+// My bookings (as guest)
+app.get("/api/bookings", verifyToken, async (req, res) => {
   const bookings = await bookingCollection
-    .find({ userEmail: email })
+    .find({ userEmail: req.user.email })
     .sort({ createdAt: -1 })
     .toArray();
   res.json(bookings);
 });
 
-// Bookings for studios I host: ?email=
-app.get("/api/bookings/host", async (req, res) => {
-  const email = String(req.query.email ?? "");
-  if (!email) return res.status(400).json({ message: "Email is required" });
-
+// Bookings for studios I host
+app.get("/api/bookings/host", verifyToken, async (req, res) => {
   const bookings = await bookingCollection
-    .find({ ownerEmail: email })
+    .find({ ownerEmail: req.user.email })
     .sort({ createdAt: -1 })
     .toArray();
   res.json(bookings);
 });
 
-// Create booking (status: Pending)
-app.post("/api/bookings", async (req, res) => {
-  const { studioId, date, startTime, endTime, crewSize, userEmail, userName } =
-    req.body;
+// Create booking (status: Pending). Guest details come from the token.
+app.post("/api/bookings", verifyToken, async (req, res) => {
+  const { studioId, date, startTime, endTime, crewSize } = req.body;
+  const userEmail = req.user.email;
+  const userName = req.user.name;
 
   const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -291,26 +326,30 @@ app.post("/api/bookings", async (req, res) => {
   res.status(201).json({ ...doc, _id: result.insertedId });
 });
 
-// Guest cancels a Pending booking
-app.patch("/api/bookings/:id/cancel", async (req, res) => {
+// Guest cancels their own Pending booking
+app.patch("/api/bookings/:id/cancel", verifyToken, async (req, res) => {
   if (!ObjectId.isValid(req.params.id)) {
     return res.status(400).json({ message: "Invalid booking id" });
   }
 
   const result = await bookingCollection.updateOne(
-    { _id: new ObjectId(req.params.id), status: "Pending" },
+    {
+      _id: new ObjectId(req.params.id),
+      userEmail: req.user.email,
+      status: "Pending",
+    },
     { $set: { status: "Cancelled", cancelledAt: new Date() } }
   );
   if (result.matchedCount === 0) {
     return res
       .status(400)
-      .json({ message: "Only pending bookings can be cancelled" });
+      .json({ message: "Only your own pending bookings can be cancelled" });
   }
   res.json({ cancelled: true });
 });
 
-// Host updates a booking: Confirmed / Completed / Cancelled
-app.patch("/api/bookings/:id/status", async (req, res) => {
+// Host updates a booking: Confirmed / Completed / Cancelled (studio owner only)
+app.patch("/api/bookings/:id/status", verifyToken, async (req, res) => {
   if (!ObjectId.isValid(req.params.id)) {
     return res.status(400).json({ message: "Invalid booking id" });
   }
@@ -325,6 +364,12 @@ app.patch("/api/bookings/:id/status", async (req, res) => {
     _id: new ObjectId(req.params.id),
   });
   if (!booking) return res.status(404).json({ message: "Booking not found" });
+
+  if (booking.ownerEmail !== req.user.email) {
+    return res.status(403).json({
+      message: "You can only manage bookings for your own studios",
+    });
+  }
 
   if (!allowedNext[booking.status]?.includes(status)) {
     return res.status(400).json({
